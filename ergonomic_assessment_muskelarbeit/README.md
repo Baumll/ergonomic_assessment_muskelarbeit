@@ -12,7 +12,7 @@ This cloned ROS driver version sets the body tracking marker color according to 
 
 
 # Launch ROS
-Start ROS via ``roslaunch ergonomic_assessment rula.launch``
+Start ROS via ``roslaunch ergonomic_assessment musclework.launch``
 
 
 # Use Rosbags
