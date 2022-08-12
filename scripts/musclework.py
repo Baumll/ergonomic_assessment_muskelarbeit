@@ -28,8 +28,8 @@ class Musclework():
         self.lastMove = [0,0] #when was the last change point
         
         self.angles = []
-        self.changePoints = []
-        self.angleNames = [
+        self.changepoints = []
+        self.angle_names = [
             "upper_arm_left",
             "upper_arm_right",
             "lower_arm_left",
@@ -53,23 +53,23 @@ class Musclework():
             for i in range(len(data.data)):
                 self.bs.append(cp.BayesOnline())
                 self.angles.append([])
-                self.changePoints.append([])
+                self.changepoints.append([])
 
     
 
 
         
         tmp_time = time.time_ns()
-        self.timeStamps.append(tmp_time)
-        deque(self.timeStamps,maxlen=self.lastElements)
+        self.timestamps.append(tmp_time)
+        deque(self.timestamps,maxlen=self.last_elements)
         
 
         for i in range(len(data.data)):
             self.angles[i].append(data.data[i])
-            deque(self.angles[i],maxlen=self.lastElements)
+            deque(self.angles[i],maxlen=self.last_elements)
             
             self.bs[i].update(data.data[i])
-            deque(self.bs[i].probabilities,maxlen=self.lastElements)
+            deque(self.bs[i].probabilities,maxlen=self.last_elements)
 
             if(len(self.angles[i]) > self.past ):
                 prob = self.bs[i].get_probabilities(self.past) #Past
@@ -79,8 +79,8 @@ class Musclework():
 
                 #Checken ob es den CP schon gab
                 for j in tmp_changepoints:
-                    if not j in self.changePoints[i]:
-                        self.changePoints[i].append(j)
+                    if not j in self.changepoints[i]:
+                        self.changepoints[i].append(j)
                         #Die Arme
                         if i <= 3:
                             self.lastMove[0] = tmp_time
@@ -90,8 +90,8 @@ class Musclework():
 
 
                 #Plus punkt vergeben
-                if len(self.changePoints[i]) > 0:
-                    if time.time_ns() - self.timeStamps[self.changePoints[i][-1]] < 1e+9*self.maxTimeSec:
+                if len(self.changepoints[i]) > 0:
+                    if time.time_ns() - self.timestamps[self.changepoints[i][-1]] < 1e+9*self.max_time:
 
                         #print("ChangePoint!")
                         #Die Arme
@@ -126,8 +126,7 @@ def plotter(data, changePoints):
     plt.show()
     quit()
 
-def createInt8MultiArray(self,data):
-
+def createInt8MultiArray(data):
     msg = Int8MultiArray()
     dim = MultiArrayDimension()
     dim.label = "RULA Scores"
@@ -156,5 +155,4 @@ if __name__ == '__main__':
         musclework_start()
     except rospy.ROSInterruptException:
         pass
-        
         
