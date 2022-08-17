@@ -14,20 +14,24 @@ from scipy import signal
 import os
 from collections import deque 
 
-one_minute = 1e+9*60
+
 
 class Musclework():
     def __init__(self):
         #Paramter
 
-        self.max_time = 10 #How long you have to hold still (in min)
-        self.last_elements = 100 #How many elemts i store
+        self.max_time = 1 #How long you have to hold still (in min)
+        self.max_elements = 100 #How many elemts to save
+        self.max_queue = 10 #How many elemts to save
+        self.one_minute = 1e+9*60
+
         self.past = 5 #How long to look in to past
         self.bs = [] #Array of the CPD
         self.timestamps = [] 
         self.lastMove = [0,0] #when was the last change point
         
         self.angles = []
+        self.queue = []
         self.changepoints = []
         self.angle_names = [
             "upper_arm_left",
@@ -46,32 +50,36 @@ class Musclework():
 
         self.pub = rospy.Publisher('/musclework', Int8MultiArray, queue_size=10)    
 
+    #Hier kommen die daten rein
     def callback(self,data):
-        #Data handle here:
+        #Adds data:
         rospy.loginfo(data.data)
-        if self.bs == []:        
-            for i in range(len(data.data)):
+        if self.bs == []:
+            for i in range(len(data.data)-2):
                 self.bs.append(cp.BayesOnline())
                 self.angles.append([])
+                self.queue.append([])
                 self.changepoints.append([])
-
-    
-
-
         
+        #Neues wird hinzu gefügt und altes rausgeschmissen
+
         tmp_time = time.time_ns()
         self.timestamps.append(tmp_time)
-        deque(self.timestamps,maxlen=self.last_elements)
         
-
-        for i in range(len(data.data)):
-            self.angles[i].append(data.data[i])
-            deque(self.angles[i],maxlen=self.last_elements)
+        deque(self.timestamps,maxlen=self.max_elements)
+        for i in range(len(data.data)-2):
+            self.queue[i].append(data.data[i])
+            deque(self.queue[i],maxlen=self.max_queue)
             
             self.bs[i].update(data.data[i])
-            deque(self.bs[i].probabilities,maxlen=self.last_elements)
+            deque(self.bs[i].probabilities,maxlen=self.max_elements)
 
-            if(len(self.angles[i]) > self.past ):
+    #Hier werden die daten verarbeitet
+    def process(self):
+        #Data handle here:
+
+        for i in range(len(self.queue)):
+            if (len(self.queue[i]) > self.past ):
                 prob = self.bs[i].get_probabilities(self.past) #Past
                 prob[0] = 0
                 lmax = signal.argrelmax(prob)[0]
@@ -83,48 +91,35 @@ class Musclework():
                         self.changepoints[i].append(j)
                         #Die Arme
                         if i <= 3:
-                            self.lastMove[0] = tmp_time
+                            self.lastMove[0] = self.timestamps[-1]
                         #Der Körper
                         elif i <= 5:
-                            self.lastMove[1] = tmp_time                
+                            self.lastMove[1] = self.timestamps[-1]               
 
 
                 #Plus punkt vergeben
                 if len(self.changepoints[i]) > 0:
-                    if time.time_ns() - self.timestamps[self.changepoints[i][-1]] < 1e+9*self.max_time:
+                    if time.time_ns() - self.timestamps[self.changepoints[i][-1]] < 1e+9 * self.max_time:
 
-                        #print("ChangePoint!")
+                        print("ChangePoint!")
                         #Die Arme
                         if i <= 3:
-                            self.lastMove[0] = tmp_time
+                            self.lastMove[0] = self.timestamps[-1]
                         #Der Körper
                         elif i <= 5:
-                            self.lastMove[1] = tmp_time   
+                            self.lastMove[1] = self.timestamps[-1]
 
         #publish extra points
         plusScore = [0,0]
         for i in range(len(self.lastMove)):
-            
-            if self.lastMove[i] + one_minute * self.max_time < tmp_time: 
+            print(self.lastMove[i])
+            if self.lastMove[i] + self.one_minute * self.max_time < self.timestamps[-1]: 
                 plusScore[i] = 1
                 #print("Noch "+ str(1e+9) + " sec.")
         
         self.pub.publish(createInt8MultiArray(plusScore))
-        #if(plusScore != [0,0]):
-            #print("Noch: " + str((1e+9+self.lastMove[0]-tmp_time)/1e+9) + " / " + str((1e+9+self.lastMove[1]-tmp_time)/1e+9) + " sec.")
 
 
-
-
-
-
-def plotter(data, changePoints):
-    fig = plt.figure(figsize=(9, 3))
-    for i in range(len(data)):
-        axs[i] = fig.add_subplot(i % np.sqrt(len(data)), np.floor(i/np.sqrt(len(data))), i)
-    axs.axhline(y=4, color='grey', linestyle='-',linewidth=.2)
-    plt.show()
-    quit()
 
 def createInt8MultiArray(data):
     msg = Int8MultiArray()
@@ -138,14 +133,15 @@ def createInt8MultiArray(data):
 
 def musclework_start():
     print("Setup Musclework")
-    rospy.init_node('Musclework', anonymous=True)
-    process = Musclework()
-    # spin() simply keeps python from exiting until this node is stopped
-    rospy.spin()
 
+    rospy.init_node('Musclework', anonymous=True)
+    musclework = Musclework()
+    rate = rospy.Rate(10)
+    
     while not rospy.is_shutdown():
         try:
-            print(("test"))
+            musclework.process()
+            rate.sleep()
         except KeyboardInterrupt:
             print("Shutting down")
 
@@ -155,4 +151,3 @@ if __name__ == '__main__':
         musclework_start()
     except rospy.ROSInterruptException:
         pass
-        
