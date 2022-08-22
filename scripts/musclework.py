@@ -23,8 +23,9 @@ class Musclework():
 
         self.past = 5 #How long to look in to past
         self.bs = [] #Array of the CPD
-        self.timestamps = [] 
-        self.lastMove = [0,0] #when was the last change point
+        self.timestamps = []
+        self.last_move_angle = []
+        self.last_move_body_part = [0,0] #when was the last change point
         
         self.angles = []
         self.queue = []
@@ -50,7 +51,7 @@ class Musclework():
             self.angles.append([])
             self.queue.append([])
             self.changepoints.append([])
-            self.last_score.append([])
+            self.last_move_angle.append(-1)
             
         #Pub sub
         rospy.Subscriber("/ergonomics/joint_angles", Float32MultiArray, self.callback)
@@ -59,8 +60,11 @@ class Musclework():
         self.pub = rospy.Publisher('/musclework', Int8MultiArray, queue_size=10)    
 
     def score_callback(self,data):
+        self.last_score = []
+        if ignore_wrist:
+            data.data = data.data[0:7]
         for i in range(len(data.data)):
-            self.last_score[i] = data.data[i]
+            self.last_score.append(data.data[i])
 
     #Hier kommen die daten rein
     def callback(self,data):
@@ -83,17 +87,21 @@ class Musclework():
 
     #Hier werden die daten verarbeitet
     def process(self):
+
+        #ToDo:Wenn score ein dann statisch ignorieren.
+        #Für jeden Winkel einzeln statisch haben. 
         #Data handle here:
         if len(self.queue[0]) > 0:
             for i in range(len(self.queue)):
                 for j in self.queue[i]:
                     self.angles[i].append(j)
-                    deque(self.angles[i],maxlen=self.max_elements)
-
                     self.bs[i].update(j)
-                    deque(self.bs[i].probabilities,maxlen=self.max_elements)
 
+                #löscht alte Elemete wieder
+                deque(self.angles[i],maxlen=self.max_elements)
+                deque(self.bs[i].probabilities,maxlen=self.max_elements)
                 self.queue[i] = []
+
 
                 if (len(self.angles[i]) > self.past ):
                     prob = self.bs[i].get_probabilities(self.past) #Past
@@ -105,31 +113,53 @@ class Musclework():
                     for j in tmp_changepoints:
                         if not j in self.changepoints[i]:
                             self.changepoints[i].append(j)
-                            #Die Arme
-                            if i <= 3:
-                                self.lastMove[0] = self.timestamps[-1]
-                            #Der Körper
-                            elif i <= 5:
-                                self.lastMove[1] = self.timestamps[-1]               
+                            deque(self.changepoints[i],maxlen=self.max_elements)
+                            self.last_move_angle[i] = self.timestamps[-1]
 
 
-                    #Plus punkt vergeben
-                    if len(self.changepoints[i]) > 0:
-                        if time.time_ns() - self.timestamps[self.changepoints[i][-1]] < 1e+9 * self.max_time:
+                #Plus punkt vergeben
+                if len(self.changepoints[i]) > 0:
+                    if time.time_ns() - self.last_move_angle[i] < 1e+9 * self.max_time:
+                        print("ChangePoint!")
+                        #upper_arm_left
+                        if i == 0:
+                            if self.last_move_angle[i] < 1e+9 * self.max_time:
+                                self.last_move_body_part[0] = 1
+                        #upper_arm_right
+                        elif i == 1:
+                            if self.last_move_angle[i] < 1e+9 * self.max_time:
+                                self.last_move_body_part[0] = 1
+                        #lower_arm left and right
+                        elif i >= 2 and i < 4:
+                            #Wenn der minimale score ist wird statisch ignoriert
+                            if self.last_score[i] > 1:
+                                if self.last_move_angle[i] < 1e+9 * self.max_time:
+                                    self.last_move_body_part[0] = 1
+                        #neck
+                        elif i == 4:
+                            if self.last_move_angle[i] < 1e+9 * self.max_time:
+                                self.last_move_body_part[1] = 1
+                        #trunk
+                        elif i == 5:
+                            if self.last_move_angle[i] < 1e+9 * self.max_time:
+                                self.last_move_body_part[1] = 1
+                        #legs
+                        elif i == 6:
+                            if self.last_move_angle[i] < 1e+9 * self.max_time:
+                                self.last_move_body_part[1] = 1
 
-                            print("ChangePoint!")
-                            #Die Arme
-                            if i <= 3:
-                                self.lastMove[0] = self.timestamps[-1]
-                            #Der Körper
-                            elif i <= 5:
-                                self.lastMove[1] = self.timestamps[-1]
+                        
+                        #wrist_left
+                        elif i == 7:
+                            pass
+                        #wrist_right
+                        elif i == 8:
+                            pass
 
             #publish extra points
             plusScore = [0,0]
-            for i in range(len(self.lastMove)):
-                print(self.lastMove[i])
-                if self.lastMove[i] + self.one_minute * self.max_time < self.timestamps[-1]: 
+            for i in range(len(self.last_move_body_part)):
+                if self.last_move_body_part[i] + self.one_minute * self.max_time < self.timestamps[-1]: 
                     plusScore[i] = 1
                     #print("Noch "+ str(1e+9) + " sec.")
         
