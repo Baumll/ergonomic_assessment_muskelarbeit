@@ -12,14 +12,16 @@ import sys
 import recursivesize
 
 one_minute = 1e+9*60
+one_second = 1e+9 #in nanao second
 
-max_time = 1 #How long you have to hold still (in min)
+max_time = 10 #How long you have to hold still (in sec)
 max_queue = 10 #Max elemts in queue
-max_elements = 251 #How many elemts to save
+max_elements = 50 #How many elemts to save
 ignore_wrist = true
-changepoint_threshold = 0.5 #how likely a change point is detected
+changepoint_threshold = 0.3 #how likely a change point is detected
 
-#self.past = 5 #How long to look in to past
+past = 5 #How long to look in to past
+start_time = time.time_ns()
 
 class Musclework():
     def __init__(self):
@@ -27,16 +29,16 @@ class Musclework():
         self.rula_score = []
 
         
-        #self.bs = [] #Array of the CPD
+        self.bs = [] #Array of the CPD
         self.cf = [] #change Finder
-        self.probabilities = []
+        self.probabilities = [] #To publish
         self.timestamps = []
         self.last_move_angle = []
         self.last_move_body_part = [0,0] #when was the last change point
 
         self.angles = []
         self.queue = []
-        self.changepoints = []
+        self.change_points = [] #When was the last changepoint for the angle
         self.angle_names = [
             "upper_arm_left",
             "upper_arm_right",
@@ -51,6 +53,7 @@ class Musclework():
         #Adds data:
         if ignore_wrist:
             tmp_max = 7
+            #Testen Welche einstellungen die besten sind
             self.cf.append(changefinder.ChangeFinder(r=0.1, order=7, smooth=3))
             self.cf.append(changefinder.ChangeFinder(r=0.1, order=7, smooth=4))
             self.cf.append(changefinder.ChangeFinder(r=0.1, order=7, smooth=5))
@@ -62,19 +65,24 @@ class Musclework():
             tmp_max = 9
 
         for i in range(tmp_max):
-            #self.bs = [cp.BayesOnline()]*tmp_max
+            cpd = cp.BayesOnline()
+            #cpd.probabilities = deque(cpd.probabilities, maxlen= max_elements)
+            self.bs.append(cpd)
             self.angles.append([])
             self.queue.append([])
-            self.changepoints.append([])
+            self.change_points.append((time.time_ns()-start_time)/one_second)
             #self.last_move_angle = [-1]*tmp_max
-            self.probabilities.append([])
+            self.probabilities.append(0)
             
         #Pub sub
         rospy.Subscriber("/ergonomics/joint_angles", Float32MultiArray, self.callback)
         rospy.Subscriber('/ergonomics/rula', Float32MultiArray, self.score_callback)
 
         self.pub = rospy.Publisher('/musclework/musclework', Int8MultiArray, queue_size=10)
-        self.pub_change_points = rospy.Publisher('/musclework/change_points', Float32MultiArray, queue_size=10)
+        self.pub_probabilities = rospy.Publisher('/musclework/probabilities', Float32MultiArray, queue_size=10)
+        #self.pub_change_points = rospy.Publisher('/musclework/change_points', Int8MultiArray, queue_size=10)
+
+        
 
     def score_callback(self,data):
         if ignore_wrist:
@@ -92,85 +100,87 @@ class Musclework():
         #rospy.loginfo(data.data)
 
         #Neues wird hinzu gefügt und altes rausgeschmissen
-        tmp_time = time.time_ns()
+        tmp_time = (time.time_ns()-start_time)/one_second
         self.timestamps.append(tmp_time)
         self.timestamps = self.timestamps[-max_elements:]
 
         for i in range(len(data.data)):
-            self.queue[i].append(data.data[0])
+            self.queue[i].append(data.data[i])
             
         self.queue[i] = self.queue[i][-max_queue:]
             
-
 
     #Hier werden die daten verarbeitet
     def process(self):
         #Data handle here:
         if len(self.queue[0]) > 0:
             for i in range(len(self.queue)):
-                for j in self.queue[i]:
-                    self.angles[i].append(j)
-                    #self.bs[i].update(j)
-                    score = self.cf[i].update(j)
-                    self.probabilities[i].append(score)
-                    if score > changepoint_threshold:
-                        self.changepoints[i].append(self.timestamps[-1])
-                
+                #Add time stamps
+                for data_point in self.queue[i]:
+                    self.angles[i].append(data_point)
+                    
+
                 #löscht alte Elemete wieder
-                self.angles[i] = self.angles[i][-max_elements:]
                 self.queue[i] = []
 
-                #Plus punkt vergeben
-                if len(self.changepoints[i]) > 0:
-                    if time.time_ns() - self.changepoints[i][-1] < 1e+9 * max_time:
-                        #upper_arm_left
-                        if i == 0:
-                            if self.changepoints[i][-1] < 1e+9 * max_time:
-                                self.last_move_body_part[0] = 1
-                        #upper_arm_right
-                        elif i == 1:
-                            if self.changepoints[i][-1] < 1e+9 * max_time:
-                                self.last_move_body_part[0] = 1
-                        #lower_arm left and right
-                        elif i >= 2 and i < 4:
-                            #Wenn der minimale score ist wird statisch ignoriert
-                            if self.rula_score[i] > 1:
-                                if self.changepoints[i][-1] < 1e+9 * max_time:
-                                    self.last_move_body_part[0] = 1
-                        #neck
-                        elif i == 4:
-                            if self.changepoints[i][-1] < 1e+9 * max_time:
-                                self.last_move_body_part[1] = 1
-                        #trunk
-                        elif i == 5:
-                            if self.changepoints[i][-1] < 1e+9 * max_time:
-                                self.last_move_body_part[1] = 1
-                        #legs
-                        elif i == 6:
-                            if self.changepoints[i][-1] < 1e+9 * max_time:
-                                self.last_move_body_part[1] = 1
+                #Bayes complete
+                if len(self.angles[i]) > past:
+                    self.angles[i] = self.angles[i][-max_elements:]
+                    tmp_changepoints = self.bs[i].find_changepoints(self.angles[i], past, changepoint_threshold)
 
-                        #wrist_left
-                        elif i == 7:
-                            pass
-                        #wrist_right
-                        elif i == 8:
-                            pass
+                    if len(tmp_changepoints) > 0:
+                        self.change_points[i] = (time.time_ns()-start_time)/one_second#
+                        print("Change Points: "+ self.angle_names[i]+ " : " + str(tmp_changepoints))
 
-            #publish extra points
-            plusScore = [0,0]
-            for i in range(len(self.last_move_body_part)):
-                if self.last_move_body_part[i] + one_minute * max_time < self.timestamps[-1]: 
-                    plusScore[i] = 1
-                    #print("Noch "+ str(1e+9) + " sec.")
+
+                    """ #Bayes CPD
+                    self.bs[i].update(data_point)
+                    prob = self.bs[i].get_probabilities(past) #Past
+                    if len(prob) > past:
+                        prob[0] = 0
+                        lmax = signal.argrelmax(prob)[0]
+                        tmp_changepoints = lmax[prob[lmax] >= changepoint_threshold] #Threshhold 
+                    """
+                    """ #Checken ob es den CP schon gab
+                    for j in tmp_changepoints:
+                        if not j in self.change_points:
+                            self.change_points.append(j)
+                            self.change_points[i] = time.time_ns()
+                            self.change_points[i] = self.change_points[i][-max_elements:] """
+                    #cleanup vom bayes 
+                    #self.bs[i].probabilities[-1] = self.bs[i].probabilities[-1][-max_elements:]
+                    self.probabilities[i] = self.bs[i].probabilities[-1][-1]*100
+
+
+                    """ #Change Finder:
+                    score = self.cf[i].update(data_point)
+                    self.probabilities[i] = score
+                    if score > changepoint_threshold:
+                        self.changepoints[i] = time.time_ns() """
+
+
+
+
+            #Plus punkt vergeben
+            #[Arme, Körper]
+            self.last_move_body_part = [0,0] #Wir gehen davon aus der Körper ist dynamisch
+            tmp_time = (time.time_ns()-start_time)/one_second
+            for i in range(4):
+                #Wenn mehr als max_time vergangen ist
+                if tmp_time - self.change_points[i] > max_time:
+                    if self.rula_score[i] > 1:
+                        self.last_move_body_part[0] = 1
+            for i in range(4,7):
+                #Neck, trunk, legs
+                if tmp_time - self.change_points[i] > max_time:
+                    if self.rula_score[i] > 1:
+                        self.last_move_body_part[1] = 1
+
         
-            self.pub.publish(createInt8MultiArray(plusScore))
-            
-            #publish the probabilitys
-            tmp_probabilities  = []
-            for i in self.probabilities:
-                tmp_probabilities.append(i[-1])
-            self.pub_change_points.publish(createMultiArray(tmp_probabilities))
+            #Publish
+            self.pub.publish(createInt8MultiArray(self.last_move_body_part))
+            #self.pub_change_points.publish(createInt8MultiArray(self.last_move_body_part))
+            self.pub_probabilities.publish(createMultiArray(self.probabilities))
             
 
 def createMultiArray(data):
