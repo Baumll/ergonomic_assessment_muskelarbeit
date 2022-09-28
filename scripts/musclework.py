@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 from importlib.abc import Finder
+from turtle import st
+import numpy as np
 from sqlalchemy import true
 import rospy
 from std_msgs.msg import Int8MultiArray, MultiArrayDimension, Float32MultiArray, Int8
@@ -10,9 +12,17 @@ from scipy import signal
 from collections import deque
 import sys
 import recursivesize
+from bocd import *
 
 one_minute = 1e+9*60
 one_second = 1e+9 #in nanao second
+
+LAMBDA = 100
+ALPHA = 0.1
+BETA = 1.0
+KAPPA = 1.0
+MU = 0.0
+DELAY = 15
 
 max_time = 10 #How long you have to hold still (in sec)
 max_queue = 10 #Max elemts in queue
@@ -20,8 +30,12 @@ max_elements = 50 #How many elemts to save
 ignore_wrist = true
 changepoint_threshold = 0.3 #how likely a change point is detected
 
+
+
 past = 5 #How long to look in to past
 start_time = time.time_ns()
+dt = 0.1 #Ist die Frequenz mit der ich daten erhalte
+fft_threashold = 100 #Ab wann frequenzen akzeptiert werden
 
 class Musclework():
     def __init__(self):
@@ -109,6 +123,8 @@ class Musclework():
             
         self.queue[i] = self.queue[i][-max_queue:]
             
+    def bocd_cpd(self, bo, data):
+        pass
 
     #Hier werden die daten verarbeitet
     def process(self):
@@ -122,6 +138,8 @@ class Musclework():
 
                 #löscht alte Elemete wieder
                 self.queue[i] = []
+                if len(self.angles[i]) >= max_elements:
+                    fastFourierTransform(self.angles[i])
 
                 #Bayes complete
                 if len(self.angles[i]) > past:
@@ -182,6 +200,19 @@ class Musclework():
             #self.pub_change_points.publish(createInt8MultiArray(self.last_move_body_part))
             self.pub_probabilities.publish(createMultiArray(self.probabilities))
             
+def fastFourierTransform(data):
+    start_time = time.time_ns()
+    n = len(data)
+    fhat = np.fft.fft(data,n)
+    PSD = fhat * np.conj(fhat) / n
+    freq = (1/(dt*n)) * np.arange(n)
+    L = np.arange(1,np.floor(n/2),dtype='int')
+    indices = PSD > fft_threashold
+    PSD_clean = PSD * indices
+    fhat = indices * fhat
+    time_nneded = time.time_ns()- start_time
+    print("FFT needed " + str(time_nneded/one_second) + " sec. with data len " + str(n))
+    return PSD_clean
 
 def createMultiArray(data):
     msg = Float32MultiArray()
