@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from curses import window
 from importlib.abc import Finder
 from turtle import st
 import numpy as np
@@ -11,6 +10,7 @@ import sdt.changepoint as cp
 import changefinder
 import time
 import matplotlib.pyplot as plt
+import math
 
 #CPD
 from functools import partial
@@ -19,23 +19,30 @@ from bocd import *
 one_minute = 1e+9*60
 one_second = 1e+9 #in nanao second
 
+#Bayes CPD
 LAMBDA = 100
 ALPHA = 0.1
 BETA = 1.0
 KAPPA = 1.0
 MU = 0.0
 
+#CHangefinder
+r = 0.1
+order = 3
+smooth = 9
+
 max_time = 10 #How long you have to hold still (in sec)
 max_queue = 10 #Max elemts in queue
+cpd_max_elemts = 15*20
 max_elements = 900 #How many elemts to save
 ignore_wrist = true
-changepoint_threshold = 0.2 #how likely a change point is detected
+changepoint_threshold = 15.0 #how likely a change point is detected
 
 
 
 past = 5 #How long to look in to past
 start_time = time.time_ns()
-fft_threashold = 100 #Ab wann frequenzen akzeptiert werden
+fft_threashold = 0.2 #Ab wann frequenzen akzeptiert werden
 
 class Musclework():
     def __init__(self):
@@ -79,6 +86,8 @@ class Musclework():
             cpd = BOCD(partial(constant_hazard, LAMBDA),
                 StudentT(ALPHA, BETA, KAPPA, MU))
             self.bs.append(cpd)
+            changeF = changefinder.ChangeFinder(r=r, order=order, smooth=smooth)
+            self.cf.append(changeF)
             self.angles.append([])
             self.queue.append([])
             self.change_points.append((time.time_ns()-start_time))
@@ -117,12 +126,9 @@ class Musclework():
         tmp_time = (time.time_ns()-start_time)
         self.timestamps.append(tmp_time)
         self.timestamps = self.timestamps[-max_elements:]
-        #if len(self.timestamps) > 2:
-        #    timedelta = (len(self.timestamps))/(self.timestamps[-1]-self.timestamps[0])*one_second
-        #    print(str(timedelta) + " aufrufe pro sec")
 
         for i in range(len(data.data)):
-            data.data[i] = data.data[i]-50.0 #
+            data.data[i] = data.data[i]#-50.0 #
             self.queue[i].append(data.data[i])
             
         self.queue[i] = self.queue[i][-max_queue:]
@@ -138,31 +144,28 @@ class Musclework():
                 for data_point in self.queue[i]:
                     self.angles[i].append(data_point)
                     self.angles[i] = self.angles[i][-max_elements:]
-                    
-
-                #löscht alte Elemete wieder
-                
 
                 #Bayes complete
-                delay = len(self.queue[i])
-                tmp_changepoints = []
-                for point in self.queue[i]:
-                    self.bs[i].update(point)
-                if self.bs[i].growth_probs[delay] >= changepoint_threshold:
-                    tmp_changepoints.append(self.bs[i].t - delay + 1)
-                self.probabilities[i] = self.bs[i].growth_probs[delay]*100
-                if tmp_changepoints != []:
+
+                self.probabilities[i] = self.CPD(self.cf[i],self.queue[i])#self.bs[i].growth_probs[delay]*100
+                if math.isnan(self.probabilities[i]):
+                    self.cf[i] = changefinder.ChangeFinder(r=r, order=order, smooth=smooth)
+
+
+                if self.probabilities[i] >= changepoint_threshold:  #self.bs[i].growth_probs[delay]
                     self.change_points[i] = time.time_ns()
-                #print(tmp_changepoints)
+                    print("CP: " + str(i))
+
+                
+                
                 #Aufräumen
-                self.bs[i].prune(min(max_elements,self.bs[i].t))
+                self.bs[i].prune(min(cpd_max_elemts,self.bs[i].t))
 
                 self.queue[i] = []
                 if len(self.angles[i]) >= 100:
                     self.fft[i] = self.fastFourierTransform(self.angles[i])
                 else:
                     self.fft[i] = -1.0
-            
             
 
             #Plus punkt vergeben
@@ -171,12 +174,12 @@ class Musclework():
             tmp_time = (time.time_ns()-start_time)
             for i in range(4):
                 #Wenn mehr als max_time vergangen ist
-                if tmp_time - self.change_points[i] > max_time:
+                if (tmp_time - self.change_points[i]) > max_time or self.fft[i] > fft_threashold:
                     if self.rula_score[i] > 1:
                         self.last_move_body_part[0] = 1
             for i in range(4,7):
                 #Neck, trunk, legs
-                if tmp_time - self.change_points[i] > max_time:
+                if (tmp_time - self.change_points[i]) > max_time or self.fft[i] > fft_threashold:
                     if self.rula_score[i] > 1:
                         self.last_move_body_part[1] = 1
             
@@ -191,6 +194,7 @@ class Musclework():
 
             
     def fastFourierTransform(self,data):
+        #Mitlere Frequenz?
         dt = (len(self.timestamps))/(self.timestamps[-1]-self.timestamps[0])*one_second
         start_time = time.time_ns()
         n = len(data)
@@ -200,14 +204,19 @@ class Musclework():
         fhat = indices * fhat
         time_nneded = time.time_ns()- start_time
     
-    
         #find Peak
         abs_PSD = np.abs(PSD[1:len(PSD)//2])
         argmax = np.argmax(abs_PSD)
 
         #print("FFT needed " + str(time_nneded/one_second) + " sec. with data len " + str(n))
-        print(str(dt * (argmax+1)/n) + " hz")
+        #print(str(dt * (argmax+1)/n) + " hz")
         return dt * (argmax+1)/n
+
+    def CPD(self,cf,data):
+        score = 0
+        for i in data:
+            score = cf.update(i)
+        return score
 
 def createMultiArray(data):
     msg = Float32MultiArray()
