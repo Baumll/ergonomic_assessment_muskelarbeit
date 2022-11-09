@@ -8,27 +8,27 @@ from scipy import signal
 if __name__=="__main__":
     data = np.loadtxt("Angle_data2.txt")
     #data = data[:750]
-    dt = 0.1
+    dt = 0.002
     #t_duration = np.linspace(0,0.5,2000,False)
-    t = np.arange(0,1,dt/100)
-    sign = data#np.sin(2*np.pi*50*t) + np.sin(2*np.pi*20*t)
+    t = np.arange(0,1,dt)
+    sign = np.sin(2*np.pi*40*t) + np.sin(2*np.pi*10*t)
     
-    fft_threashold = 5000
+    #fft_threashold = 5000
     #FFT
     n = len(sign)
     fhat = np.fft.fft(sign,n)
     PSD = fhat * np.conj(fhat) / n
     freq = (1/(dt*n)) * np.arange(n)
-    L = np.arange(1,np.floor(n/2),dtype='int')
+    L = np.arange(1,np.floor(n),dtype='int')
 
     abs_PSD = np.abs(PSD[1:len(PSD)//2])
     #PSD = PSD[1:len(PSD)//2]
     max = np.max(abs_PSD)
-    fft_threashold = max//2
+    #fft_threashold = max//2
 
-    indices = PSD > fft_threashold
-    PSD_clean = PSD * indices
-    fhat = indices * fhat
+    #indices = PSD > fft_threashold
+    #PSD_clean = PSD * indices
+    #fhat = indices * fhat
     ffilt = np.fft.ifft(fhat)
 
     print("Peak")
@@ -55,25 +55,17 @@ if __name__=="__main__":
     wffilt = np.fft.ifft(wfhat) """
 
     #PLOT
-    fig,axs = plt.subplots(4,1)
+    fig,axs = plt.subplots(2,1)
     plt.sca(axs[0])
-    plt.plot(sign,color='r',LineWidth=1.5,label='data')
+    plt.plot(sign,color='blue',LineWidth=1.5,label='Signal')
     #plt.xlim(sign[0],sign[-1])
-    plt.legend()
+    plt.legend(loc=9 ,prop={'size': 15})
 
     plt.sca(axs[1])
-    plt.plot(freq[L],PSD[L],color='b',LineWidth=2,label='FFT' )
-    plt.xlim(freq[L[0]],freq[L[-1]])
-    plt.legend()
+    plt.plot(freq[L],PSD[L],color='red',LineWidth=2,label='FFT' )
+    #plt.xlim(freq[L[0]],freq[L[-1]])
+    plt.xlabel('Frequenz in Hz')
+    plt.legend(loc=9, prop={'size': 15})
 
-    plt.sca(axs[2])
-    plt.plot(freq[L],PSD_clean[L],color='b',LineWidth=2,label='clean FFT' )
-    plt.xlim(freq[L[0]],freq[L[-1]])
-    plt.legend()
-
-    plt.sca(axs[3])
-    plt.plot(ffilt,color='k',LineWidth=2,label='FFT Reverse' )
-    #plt.xlim(0,n)
-    plt.legend()
 
     plt.show()
