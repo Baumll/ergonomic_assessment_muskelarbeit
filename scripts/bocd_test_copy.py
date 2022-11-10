@@ -74,7 +74,7 @@ class Musclework():
             self.bs.append(cpd)
             self.angles.append([])
             self.queue.append([])
-            self.change_points.append([])
+            self.change_points.append(-1.)
             self.fft.append(-1.0)
             
         #Pub sub
@@ -84,7 +84,7 @@ class Musclework():
         self.pub = rospy.Publisher('/musclework/musclework', Int8MultiArray, queue_size=10)
 
         #init expoerter:
-        self.export = exporter()
+        self.export = exporter(tmp_max)
         
 
     def score_callback(self,data):
@@ -104,39 +104,39 @@ class Musclework():
 
         #Neues wird hinzu gefügt und altes rausgeschmissen
         data.data = list(data.data)
-        tmp_time = (time.time_ns()-start_time)
-        self.timestamps.append(tmp_time)
-        self.timestamps = self.timestamps[-max_elements:]
 
         for i in range(len(data.data)):
-            data.data[i] = data.data[i]
             self.queue[i].append(data.data[i])
-            
-        self.queue[i] = self.queue[i][-max_queue:]
-        self.export.add_cpd(self.queue)
+            self.queue[i] = self.queue[i][-max_queue:]
+        
+
+        self.timestamps.append(time.time_ns()-start_time)
+        self.timestamps = self.timestamps[-max_elements:]
+        self.export.add_angels(self.queue)
             
 
     #Hier werden die daten verarbeitet
     def process(self):
-        pro_start_time = time.time_ns()
         #Data handle here:
         if len(self.queue[0]) > 0:
             for i in range(len(self.queue)):
-                #Add time stamps
+                #Add data
                 for data_point in self.queue[i]:
                     self.angles[i].append(data_point)
-                    self.angles[i] = self.angles[i][-max_elements:]
+                self.angles[i] = self.angles[i][-max_elements:]
                 
 
                 #Bayes complete
-
-                self.change_points[i] += BOCD_prune(self.bs[i], self.queue[i])           
+                tmp_cp = self.BOCD_prune(self.bs[i], self.queue[i])
+                if tmp_cp != []:
+                    self.change_points[i] = self.timestamps[-1] #hier wird die zeit des letzten change points genommen
                 
                 #Aufräumen
-
                 self.queue[i] = []
-                if len(self.angles[i]) > max_elements:
-                    self.fft[i] = self.fastFourierTransform(self.angles[i][-max_elements:])
+                
+                #FFT
+                if len(self.angles[i]) > max_elements/4:
+                    self.fft[i] = self.fastFourierTransform(self.angles[i])
                 else:
                     self.fft[i] = -1.0
             
@@ -144,39 +144,42 @@ class Musclework():
             #Plus punkt vergeben
             #[Arme, Körper]
             self.last_move_body_part = [0,0] #Wir gehen davon aus der Körper ist dynamisch
+            self.repetive_body_part = [0,0]
             tmp_time = (time.time_ns()-start_time)
             for i in range(4):
                 #Wenn mehr als max_time vergangen ist
-                if (tmp_time - self.change_points[i]) > max_time or self.fft[i] > fft_threashold:
+                if (tmp_time - self.change_points[i]) > max_time*one_second:
                     if self.rula_score[i] > 1:
                         self.last_move_body_part[0] = 1
+                #FFT
+                if self.fft[i] > fft_threashold: #Hier gerne auch mehr testen
+                    self.repetive_body_part[0] = 1
+
             for i in range(4,7):
                 #Neck, trunk, legs
-                if (tmp_time - self.change_points[i]) > max_time or self.fft[i] > fft_threashold:
+                if (tmp_time - self.change_points[i]) > max_time*one_second:
                     if self.rula_score[i] > 1:
                         self.last_move_body_part[1] = 1
-            
+                #FFT
+                if self.fft[i] > fft_threashold: #Hier gerne auch mehr testen
+                    self.repetive_body_part[1] = 1
+
+            #Zusammen rechnen
+            self.end_score = [0,0]
+            self.end_score[0] = min(1, self.last_move_body_part[0]+ self.repetive_body_part[0])
+            self.end_score[1] = min(1, self.last_move_body_part[1]+ self.repetive_body_part[1])
+
             #Publish
-            self.pub.publish(createInt8MultiArray(self.last_move_body_part))
-
-            if len(self.angles[0]) > 2000:
-                show_changepoints(self.angles, self.change_points)
-
-            size = 0
-            for i in self.bs:
-                size += getsize(i)
-            print("Size: ",size, " bytes")
+            self.pub.publish(createInt8MultiArray(self.end_score))
             
     def fastFourierTransform(self,data):
         #Mitlere Frequenz?
         dt = (len(self.timestamps))/(self.timestamps[-1]-self.timestamps[0])*one_second
-        start_time = time.time_ns()
         n = len(data)
         fhat = np.fft.fft(data,n)
         PSD = fhat * np.conj(fhat) / n
         indices = PSD > fft_threashold
         fhat = indices * fhat
-        time_nneded = time.time_ns()- start_time
     
         #find Peak
         abs_PSD = np.abs(PSD[1:len(PSD)//2])
@@ -184,12 +187,36 @@ class Musclework():
 
         return dt * (argmax+1)/n
 
+    
+    def BOCD_prune(self,bocd, data):
+        """Tests that changepoints are detected while pruning.
+        """
+        changepoints = []
+        if bocd.t <= DELAY:
+            for x in data:
+                bocd.update(x)
+        else:
+            for x in data:
+                bocd.update(x)
+                if bocd.growth_probs[DELAY] >= THRESHOLD:
+                    changepoints.append(bocd.t - DELAY + 1)
+                    bocd.prune(bocd.t-DELAY)
+        if bocd.t - bocd.t0 > max_elements:
+            bocd.prune(bocd.t-DELAY)
+        return changepoints
+
+
 class exporter():
-    def __init__(self):
+    def __init__(self, lenght):
         self.angles = []
         self.change_points = []
         self.fft = []
 
+        for i in range(lenght):
+            self.angles.append([])
+            self.change_points.append([])
+            self.fft.append([])
+        
         self.angle_names = [
             "upper_arm_left",
             "upper_arm_right",
@@ -218,7 +245,11 @@ class exporter():
 
     def add_angels(self,data):
         for i in range(len(data)):
-            self.angels[i] += data[i]
+            self.angles[i] += data[i]
+        
+        if len(self.angles[0]) > 2000:
+            pass
+            #show_changepoints(self.angles, self.change_points)
 
     def add_fft(self,data):
         for i in range(len(data)):
@@ -290,24 +321,6 @@ def musclework_start():
             rate.sleep()
         except KeyboardInterrupt:
             print("Shutting down")
-
-
-def BOCD_prune(bocd, data):
-    """Tests that changepoints are detected while pruning.
-    """
-    changepoints = []
-    if bocd.t <= DELAY:
-        for x in data:
-            bocd.update(x)
-    else:
-        for x in data:
-            bocd.update(x)
-            if bocd.growth_probs[DELAY] >= THRESHOLD:
-                changepoints.append(bocd.t - DELAY + 1)
-                bocd.prune(bocd.t-DELAY)
-    if bocd.t - bocd.t0 > max_elements:
-        bocd.prune(bocd.t-DELAY)
-    return changepoints
 
 
 if __name__ == '__main__':

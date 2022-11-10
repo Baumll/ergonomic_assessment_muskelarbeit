@@ -1,46 +1,38 @@
 #!/usr/bin/env python3
-from importlib.abc import Finder
-from turtle import st
 import numpy as np
-from numpy import angle
 from sqlalchemy import true
 import rospy
-from std_msgs.msg import Int8MultiArray, MultiArrayDimension, Float32MultiArray, Int8
-import sdt.changepoint as cp
-import changefinder
+from std_msgs.msg import Int8MultiArray, MultiArrayDimension, Float32MultiArray
 import time
 import matplotlib.pyplot as plt
 import math
-
-#CPD
 from functools import partial
 from bocd import *
+import sys
+from types import ModuleType, FunctionType
+from gc import get_referents
+import pandas as pd
+
 
 one_minute = 1e+9*60
 one_second = 1e+9 #in nanao second
 
 #Bayes CPD
 LAMBDA = 100
-ALPHA = 0.1
-BETA = 1.0
-KAPPA = 1.0
-MU = 0.0
+ALPHA = .1
+BETA = 1.
+KAPPA = 1.
+MU = 0.
+DELAY = 7
+THRESHOLD = 0.3
 
-#CHangefinder
-r = 0.1
-order = 3
-smooth = 9
-
-max_time = 10 #How long you have to hold still (in sec)
+max_time = 60 #How long you have to hold still (in sec)
 max_queue = 10 #Max elemts in queue
-cpd_max_elemts = 15*20
 max_elements = 900 #How many elemts to save
 ignore_wrist = true
-changepoint_threshold = 15.0 #how likely a change point is detected
 
+BLACKLIST = type, ModuleType, FunctionType
 
-
-past = 5 #How long to look in to past
 start_time = time.time_ns()
 fft_threashold = 0.2 #Ab wann frequenzen akzeptiert werden
 
@@ -48,13 +40,9 @@ class Musclework():
     def __init__(self):
         #Paramter
         self.rula_score = []
-
         
         self.bs = [] #Array of the CPD
-        self.cf = [] #change Finder
-        self.probabilities = [] #To publish
         self.timestamps = []
-        self.last_move_angle = []
         self.last_move_body_part = [0,0] #when was the last change point
 
         self.angles = []
@@ -74,8 +62,6 @@ class Musclework():
         #FFT
         self.fft = []
 
-        #Test
-        self.callback_calls = 0
         #Adds data:
         if ignore_wrist:
             tmp_max = 7
@@ -86,12 +72,9 @@ class Musclework():
             cpd = BOCD(partial(constant_hazard, LAMBDA),
                 StudentT(ALPHA, BETA, KAPPA, MU))
             self.bs.append(cpd)
-            changeF = changefinder.ChangeFinder(r=r, order=order, smooth=smooth)
-            self.cf.append(changeF)
             self.angles.append([])
             self.queue.append([])
-            self.change_points.append((time.time_ns()-start_time))
-            self.probabilities.append(0)
+            self.change_points.append(-1.)
             self.fft.append(-1.0)
             
         #Pub sub
@@ -99,10 +82,9 @@ class Musclework():
         rospy.Subscriber('/ergonomics/rula', Float32MultiArray, self.score_callback)
 
         self.pub = rospy.Publisher('/musclework/musclework', Int8MultiArray, queue_size=10)
-        self.pub_probabilities = rospy.Publisher('/musclework/probabilities', Float32MultiArray, queue_size=10)
-        self.pub_fft = rospy.Publisher('/musclework/fft', Float32MultiArray, queue_size=10)
-        #self.pub_change_points = rospy.Publisher('/musclework/change_points', Int8MultiArray, queue_size=10)
 
+        #init expoerter:
+        self.export = exporter(tmp_max)
         
 
     def score_callback(self,data):
@@ -115,7 +97,6 @@ class Musclework():
     #Hier kommen die daten rein
     def callback(self,data):
         #Die letzten beiden Elemente werden rausgeworfen
-        
         if ignore_wrist:
             data.data = data.data[0:7]
         
@@ -123,46 +104,38 @@ class Musclework():
 
         #Neues wird hinzu gefügt und altes rausgeschmissen
         data.data = list(data.data)
-        tmp_time = (time.time_ns()-start_time)
-        self.timestamps.append(tmp_time)
-        self.timestamps = self.timestamps[-max_elements:]
 
         for i in range(len(data.data)):
-            data.data[i] = data.data[i]#-50.0 #
             self.queue[i].append(data.data[i])
-            
-        self.queue[i] = self.queue[i][-max_queue:]
+            self.queue[i] = self.queue[i][-max_queue:]
+        
+
+        self.timestamps.append(time.time_ns()-start_time)
+        self.timestamps = self.timestamps[-max_elements:]
+        self.export.add_angels(self.queue)
             
 
     #Hier werden die daten verarbeitet
     def process(self):
-        pro_start_time = time.time_ns()
         #Data handle here:
         if len(self.queue[0]) > 0:
             for i in range(len(self.queue)):
-                #Add time stamps
+                #Add data
                 for data_point in self.queue[i]:
                     self.angles[i].append(data_point)
-                    self.angles[i] = self.angles[i][-max_elements:]
+                self.angles[i] = self.angles[i][-max_elements:]
+                
 
                 #Bayes complete
-
-                self.probabilities[i] = self.CPD(self.cf[i],self.queue[i])#self.bs[i].growth_probs[delay]*100
-                if math.isnan(self.probabilities[i]):
-                    self.cf[i] = changefinder.ChangeFinder(r=r, order=order, smooth=smooth)
-
-
-                if self.probabilities[i] >= changepoint_threshold:  #self.bs[i].growth_probs[delay]
-                    self.change_points[i] = time.time_ns()
-                    print("CP: " + str(i))
-
-                
+                tmp_cp = self.BOCD_prune(self.bs[i], self.queue[i])
+                if tmp_cp != []:
+                    self.change_points[i] = self.timestamps[-1] #hier wird die zeit des letzten change points genommen
                 
                 #Aufräumen
-                self.bs[i].prune(min(cpd_max_elemts,self.bs[i].t))
-
                 self.queue[i] = []
-                if len(self.angles[i]) >= 100:
+                
+                #FFT
+                if len(self.angles[i]) > max_elements/4:
                     self.fft[i] = self.fastFourierTransform(self.angles[i])
                 else:
                     self.fft[i] = -1.0
@@ -171,52 +144,149 @@ class Musclework():
             #Plus punkt vergeben
             #[Arme, Körper]
             self.last_move_body_part = [0,0] #Wir gehen davon aus der Körper ist dynamisch
+            self.repetive_body_part = [0,0]
             tmp_time = (time.time_ns()-start_time)
             for i in range(4):
                 #Wenn mehr als max_time vergangen ist
-                if (tmp_time - self.change_points[i]) > max_time or self.fft[i] > fft_threashold:
+                if (tmp_time - self.change_points[i]) > max_time*one_second:
                     if self.rula_score[i] > 1:
                         self.last_move_body_part[0] = 1
+                #FFT
+                if self.fft[i] > fft_threashold: #Hier gerne auch mehr testen
+                    self.repetive_body_part[0] = 1
+
             for i in range(4,7):
                 #Neck, trunk, legs
-                if (tmp_time - self.change_points[i]) > max_time or self.fft[i] > fft_threashold:
+                if (tmp_time - self.change_points[i]) > max_time*one_second:
                     if self.rula_score[i] > 1:
                         self.last_move_body_part[1] = 1
-            
+                #FFT
+                if self.fft[i] > fft_threashold: #Hier gerne auch mehr testen
+                    self.repetive_body_part[1] = 1
+
+            #Zusammen rechnen
+            self.end_score = [0,0]
+            self.end_score[0] = min(1, self.last_move_body_part[0]+ self.repetive_body_part[0])
+            self.end_score[1] = min(1, self.last_move_body_part[1]+ self.repetive_body_part[1])
+
             #Publish
-            self.pub.publish(createInt8MultiArray(self.last_move_body_part))
-            #self.pub_change_points.publish(createInt8MultiArray(self.last_move_body_part))
-            self.pub_fft.publish(createMultiArray(self.fft))
-            self.pub_probabilities.publish(createMultiArray(self.probabilities))
-
-
-            #print("Time Needed: " + str((time.time_ns()- pro_start_time)/one_second))
-
+            self.pub.publish(createInt8MultiArray(self.end_score))
             
     def fastFourierTransform(self,data):
         #Mitlere Frequenz?
         dt = (len(self.timestamps))/(self.timestamps[-1]-self.timestamps[0])*one_second
-        start_time = time.time_ns()
         n = len(data)
         fhat = np.fft.fft(data,n)
         PSD = fhat * np.conj(fhat) / n
         indices = PSD > fft_threashold
         fhat = indices * fhat
-        time_nneded = time.time_ns()- start_time
     
         #find Peak
         abs_PSD = np.abs(PSD[1:len(PSD)//2])
         argmax = np.argmax(abs_PSD)
 
-        #print("FFT needed " + str(time_nneded/one_second) + " sec. with data len " + str(n))
-        #print(str(dt * (argmax+1)/n) + " hz")
         return dt * (argmax+1)/n
 
-    def CPD(self,cf,data):
-        score = 0
-        for i in data:
-            score = cf.update(i)
-        return score
+    
+    def BOCD_prune(self,bocd, data):
+        """Tests that changepoints are detected while pruning.
+        """
+        changepoints = []
+        if bocd.t <= DELAY:
+            for x in data:
+                bocd.update(x)
+        else:
+            for x in data:
+                bocd.update(x)
+                if bocd.growth_probs[DELAY] >= THRESHOLD:
+                    changepoints.append(bocd.t - DELAY + 1)
+                    bocd.prune(bocd.t-DELAY)
+        if bocd.t - bocd.t0 > max_elements:
+            bocd.prune(bocd.t-DELAY)
+        return changepoints
+
+
+class exporter():
+    def __init__(self, lenght):
+        self.angles = []
+        self.change_points = []
+        self.fft = []
+
+        for i in range(lenght):
+            self.angles.append([])
+            self.change_points.append([])
+            self.fft.append([])
+        
+        self.angle_names = [
+            "upper_arm_left",
+            "upper_arm_right",
+            "lower_arm_left",
+            "lower_arm_right",
+            "neck",
+            "trunk",
+            "legs",
+            "wrist_left",
+            "wrist_right"]
+    
+    def export_all(self):
+        dict = {}
+        for i in range(len(self.angles)):
+            dict[self.angle_names[i]] = self.angles[i]
+        
+        for i in range(len(self.fft)):
+            dict[self.angle_names[i]+"_fft"] = self.fft[i]
+        
+        for i in range(len(self.change_points)):
+            dict[self.angle_names[i]+"_cp"] = self.change_points[i]
+
+        export = pd.DataFrame.from_dict(dict)
+        export.to_csv (r'muscelwork.csv', index = False, header=True)
+
+
+    def add_angels(self,data):
+        for i in range(len(data)):
+            self.angles[i] += data[i]
+        
+        if len(self.angles[0]) > 2000:
+            pass
+            #show_changepoints(self.angles, self.change_points)
+
+    def add_fft(self,data):
+        for i in range(len(data)):
+            self.fft[i] += data[i]
+
+    def add_cpd(self,data):
+        for i in range(len(data)):
+            self.cpd[i] += data[i]
+
+    def show_changepoints(self, data, changepoints):
+        y_fig = math.ceil(len(data)/3)
+        figure, axis = plt.subplots(3, y_fig)
+
+        for i in range(len(axis)):
+            for j in range(len(axis[i])):
+                if i*3+j < len(data):
+                    axis[i,j].plot(data[i*3+j])
+                    for x in changepoints[i*3+j]:
+                        axis[i,j].axvline(x,lw=1, color='red')
+        plt.show()
+
+def getsize(obj):
+    """sum size of object & members."""
+    if isinstance(obj, BLACKLIST):
+        raise TypeError('getsize() does not take argument of type: '+ str(type(obj)))
+    seen_ids = set()
+    size = 0
+    objects = [obj]
+    while objects:
+        need_referents = []
+        for obj in objects:
+            if not isinstance(obj, BLACKLIST) and id(obj) not in seen_ids:
+                seen_ids.add(id(obj))
+                size += sys.getsizeof(obj)
+                need_referents.append(obj)
+        objects = get_referents(*need_referents)
+    return size
 
 def createMultiArray(data):
     msg = Float32MultiArray()
